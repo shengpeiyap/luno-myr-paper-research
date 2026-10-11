@@ -94,3 +94,19 @@ Omit `--once` to poll every 15 minutes. Once the API is available, use only a re
 This is not ready for unattended use: candle access has not been verified for this account, the model has not been validated on historical account-specific fees and real paper logs, and the portfolio is not yet reconciled against actual account balances. Treat paper results as engineering validation only.
 
 The MCP integration follows Luno's documented server and tool names: https://github.com/luno/luno-mcp. The server is a separate executable/container; the Python project launches it over MCP stdio and never invokes its account or write tools.
+
+## Offline four-asset portfolio replay
+
+`replay` runs the baseline MA/MACD signal through a local virtual MYR account for BTC, ETH, SOL, and XRP together. It makes no network calls and does not need Luno credentials. Provide four CSVs named `BTC-4h.csv`, `ETH-4h.csv`, `SOL-4h.csv`, and `XRP-4h.csv` for a 4-hour replay (or the corresponding `-1d.csv` files). Each CSV uses `timestamp,open,high,low,close,volume`; each file needs at least 60 contiguous bars, and all four must cover the exact same timestamps.
+
+The portfolio shares one cash balance and enforces the configured per-trade risk, per-asset and total exposure caps, MYR-calendar-day entry limit, and account drawdown halt. Entries use the next candle open with supplied fee, spread, and slippage assumptions; stops use candle low/high information with gap-aware fills. Historical order books are not present in OHLCV data, so depth and 15-minute execution conditions are not modeled. This is a research simulation and does not forecast real performance.
+
+Example:
+
+```powershell
+.\.venv\Scripts\python.exe -m luno_agent.cli replay `
+  --data-dir .\data --timeframe 4h --equity-myr 10000 --stop-loss-pct 6.5 `
+  --fee-pct-per-side 0.60 --spread-pct-round-trip 0.10 --slippage-pct-per-side 0.05
+```
+
+Cost values above are examples only; replace them with assumptions appropriate to your Luno fee tier and the data source. The default report is `.paper/replay-latest.json`, ignored by Git, and contains the full virtual trade ledger and per-candle equity curve. The console prints a summary. Runs are independent and do not update the persistent `paper` account ledger.

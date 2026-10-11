@@ -15,6 +15,7 @@ from pathlib import Path
 from .backtest import load_candles_csv, run_backtest
 from .indicators import momentum_signal
 from .paper import PaperSafetyError, acquire_lock, load_state, release_lock, run_paper_cycle, save_state
+from .portfolio_replay import run_portfolio_replay
 
 TIMEFRAMES = {"4h": 14_400, "1d": 86_400}
 ASSETS = {"BTC", "ETH", "SOL", "XRP"}
@@ -55,6 +56,15 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_parser.add_argument("--fee-pct-per-side", required=True, type=float, help="Actual or scenario fee per fill, as percent.")
     backtest_parser.add_argument("--spread-pct-round-trip", required=True, type=float, help="Assumed full bid/ask spread, as percent.")
     backtest_parser.add_argument("--slippage-pct-per-side", required=True, type=float, help="Assumed slippage per fill, as percent.")
+    replay_parser = subparsers.add_parser("replay", help="Replay all four assets in one offline MYR portfolio from local CSVs.")
+    replay_parser.add_argument("--data-dir", default="data", help="Directory containing ASSET-TIMEFRAME.csv for all four assets.")
+    replay_parser.add_argument("--timeframe", choices=sorted(TIMEFRAMES), default="4h")
+    replay_parser.add_argument("--equity-myr", required=True, type=float, help="Starting virtual MYR balance.")
+    replay_parser.add_argument("--stop-loss-pct", type=float, default=None, help="Fixed stop percentage; defaults to the configured paper stop.")
+    replay_parser.add_argument("--fee-pct-per-side", required=True, type=float, help="Estimated fee per fill, as percent.")
+    replay_parser.add_argument("--spread-pct-round-trip", required=True, type=float, help="Assumed full spread, as percent.")
+    replay_parser.add_argument("--slippage-pct-per-side", required=True, type=float, help="Assumed slippage per fill, as percent.")
+    replay_parser.add_argument("--report", default=".paper/replay-latest.json", help="Output JSON report path (includes trades and equity curve).")
     paper_parser = subparsers.add_parser("paper", help="Run persistent paper-only execution from candle CSVs and live public books.")
     paper_parser.add_argument("--data-dir", default="data", help="Directory containing ASSET-TIMEFRAME.csv files.")
     paper_parser.add_argument("--state-file", default=".paper/account.json", help="Local paper ledger path (never committed).")
@@ -95,6 +105,37 @@ def run_backtest_cli(args: argparse.Namespace) -> int:
         "candles": len(candles), "first_timestamp_ms": candles[0]["timestamp"],
         "last_timestamp_ms": candles[-1]["timestamp"], "results": results,
     }, indent=2))
+    return 0
+
+
+def run_replay_cli(args: argparse.Namespace) -> int:
+    if args.equity_myr <= 0:
+        raise ValueError("--equity-myr must be positive")
+    config_path = Path(__file__).resolve().parent.parent / "config" / "strategy.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    risk = config["risk"]
+    activity = config["activity"]
+    stop_loss_pct = args.stop_loss_pct if args.stop_loss_pct is not None else risk["paper_default_stop_loss_pct"]
+    result = run_portfolio_replay(
+        args.data_dir, timeframe=args.timeframe, initial_equity_myr=args.equity_myr,
+        stop_loss_pct=stop_loss_pct, account_risk_pct=risk["max_account_risk_per_trade_pct"],
+        asset_exposure_pct=risk["max_asset_exposure_pct"],
+        total_exposure_pct=risk["max_total_crypto_exposure_pct"],
+        max_entries_per_day=activity["max_new_entries_per_myr_calendar_day"],
+        drawdown_warning_pct=risk["account_drawdown_warning_pct"],
+        drawdown_halt_pct=risk["account_drawdown_halt_pct"],
+        fee_pct_per_side=args.fee_pct_per_side,
+        spread_pct_round_trip=args.spread_pct_round_trip,
+        slippage_pct_per_side=args.slippage_pct_per_side,
+    )
+    report_path = Path(args.report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    summary = {key: value for key, value in result.items() if key not in {"trades", "equity_curve"}}
+    summary["trades"] = len(result["trades"])
+    summary["equity_curve_points"] = len(result["equity_curve"])
+    summary["report"] = str(report_path.resolve())
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -208,6 +249,12 @@ def main() -> int:
             if args.equity_myr <= 0:
                 parser.error("--equity-myr must be positive")
             return run_backtest_cli(args)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+    if args.command == "replay":
+        try:
+            return run_replay_cli(args)
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
