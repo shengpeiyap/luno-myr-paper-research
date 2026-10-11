@@ -9,8 +9,9 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-from .api import LunoAPIError, LunoPublicClient
+from .backtest import load_candles_csv, run_backtest
 from .indicators import momentum_signal
 
 TIMEFRAMES = {"4h": 14_400, "1d": 86_400}
@@ -34,7 +35,7 @@ async def discover(client: LunoPublicClient) -> list[dict]:
     return rows
 
 
-async def main_async() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only Luno MYR market research (no live orders).")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("discover", help="List configured assets with an exact Luno MYR market.")
@@ -44,13 +45,52 @@ async def main_async() -> int:
     signal_parser.add_argument("--timeframe", choices=sorted(TIMEFRAMES), default="4h")
     signal_parser.add_argument("--assets", nargs="+", choices=sorted(ASSETS), default=sorted(ASSETS))
     signal_parser.add_argument("--lookback", type=int, default=400, help="Number of candles to request (max 1000).")
-    args = parser.parse_args()
+    backtest_parser = subparsers.add_parser("backtest", help="Compare stop candidates using a local OHLCV CSV.")
+    backtest_parser.add_argument("--csv", required=True, help="CSV with timestamp,open,high,low,close,volume columns.")
+    backtest_parser.add_argument("--asset", required=True, choices=sorted(ASSETS))
+    backtest_parser.add_argument("--timeframe", required=True, choices=sorted(TIMEFRAMES))
+    backtest_parser.add_argument("--equity-myr", required=True, type=float, help="Starting MYR paper equity.")
+    backtest_parser.add_argument("--fee-pct-per-side", required=True, type=float, help="Actual or scenario fee per fill, as percent.")
+    backtest_parser.add_argument("--spread-pct-round-trip", required=True, type=float, help="Assumed full bid/ask spread, as percent.")
+    backtest_parser.add_argument("--slippage-pct-per-side", required=True, type=float, help="Assumed slippage per fill, as percent.")
+    return parser
 
-    if args.command == "signal" and not (os.environ.get("LUNO_API_KEY_ID") and os.environ.get("LUNO_API_SECRET")):
-        print("Error: Luno requires API authentication for candles. Set a Luno read-only API key in this PowerShell session.", file=sys.stderr)
-        return 2
-    if args.command == "signal" and not 35 <= args.lookback <= 1000:
-        parser.error("--lookback must be between 35 and 1000")
+
+def run_backtest_cli(args: argparse.Namespace) -> int:
+    if args.equity_myr <= 0:
+        raise ValueError("--equity-myr must be positive")
+    candles = load_candles_csv(args.csv, TIMEFRAMES[args.timeframe])
+    config_path = Path(__file__).resolve().parent.parent / "config" / "strategy.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    risk = config["risk"]
+    activity = config["activity"]
+    results = [run_backtest(
+        candles, asset=args.asset, timeframe=args.timeframe,
+        initial_equity_myr=args.equity_myr, stop_loss_pct=stop_pct,
+        account_risk_pct=risk["max_account_risk_per_trade_pct"],
+        asset_exposure_pct=risk["max_asset_exposure_pct"],
+        total_exposure_pct=risk["max_total_crypto_exposure_pct"],
+        max_entries_per_day=activity["max_new_entries_per_myr_calendar_day"],
+        drawdown_warning_pct=risk["account_drawdown_warning_pct"],
+        drawdown_halt_pct=risk["account_drawdown_halt_pct"],
+        fee_pct_per_side=args.fee_pct_per_side,
+        spread_pct_round_trip=args.spread_pct_round_trip,
+        slippage_pct_per_side=args.slippage_pct_per_side,
+    ) for stop_pct in risk["stop_loss_candidates_pct"]]
+    print(json.dumps({
+        "research_only": True, "fill_model": "next_candle_open_with_spread_and_slippage",
+        "asset_scope": "single_asset_per_run; results are not a combined portfolio",
+        "candles": len(candles), "first_timestamp_ms": candles[0]["timestamp"],
+        "last_timestamp_ms": candles[-1]["timestamp"], "results": results,
+    }, indent=2))
+    return 0
+
+
+async def main_async(args: argparse.Namespace) -> int:
+
+    # Import MCP only for live market commands. Offline CSV backtests and
+    # --help remain usable even when the MCP dependency/runtime is unavailable.
+    from .api import LunoAPIError, LunoPublicClient
 
     try:
         async with LunoPublicClient() as client:
@@ -94,11 +134,27 @@ async def main_async() -> int:
                 return 2
         return 0
     except (LunoAPIError, KeyError, ValueError) as exc:
-        parser.exit(2, f"Error: {exc}\n")
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
 
 def main() -> int:
-    return asyncio.run(main_async())
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.command == "backtest":
+        try:
+            if args.equity_myr <= 0:
+                parser.error("--equity-myr must be positive")
+            return run_backtest_cli(args)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+    if args.command == "signal" and not (os.environ.get("LUNO_API_KEY_ID") and os.environ.get("LUNO_API_SECRET")):
+        print("Error: Luno requires API authentication for candles. Set a Luno read-only API key in this PowerShell session.", file=sys.stderr)
+        return 2
+    if args.command == "signal" and not 35 <= args.lookback <= 1000:
+        parser.error("--lookback must be between 35 and 1000")
+    return asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":

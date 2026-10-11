@@ -38,7 +38,7 @@ $env:LUNO_MCP_ARGS = ""
 \.venv\Scripts\python.exe -m luno_agent.cli discover
 ```
 
-Market discovery, ticker, and order-book calls work without credentials. Luno's candle endpoint requires authentication in the current API, so `signal` needs a Luno **read-only** API key. Create it in Luno under Profile → Security → API keys and choose **Read-only access**. Do not use a trading-access key. The project removes `ALLOW_WRITE_OPERATIONS` from the MCP child environment and allow-lists only `get_markets_info`, `get_candles`, `get_order_book`, and `get_ticker`.
+Market discovery, ticker, and order-book calls work without credentials. Luno's current API reference labels candles as requiring no permission, but the installed MCP server returned `ErrUnauthorized` when we tried without credentials. In this environment, `signal` therefore needs a Luno **read-only** API key. Create it in Luno under Profile → Security → API keys and choose **Read-only access**. Do not use a trading-access key. The project removes `ALLOW_WRITE_OPERATIONS` from the MCP child environment and allow-lists only `get_markets_info`, `get_candles`, `get_order_book`, and `get_ticker`.
 
 Without an API key, check supported MYR markets and fetch a live snapshot:
 
@@ -60,6 +60,22 @@ finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 Remove-Item Env:LUNO_API_KEY_ID,Env:LUNO_API_SECRET
 ```
 
-`discover` shows which requested assets currently have an exact MYR market and its exchange-reported status. `snapshot` fetches ticker and top-of-book data once when invoked. With a read-only key set, `signal` fetches up to 1,000 candles and prints an explainable baseline MA/MACD candidate signal. No command places orders or records a simulated fill. The signal is deliberately a starting rule for research, not an instruction to buy or sell. Automated 15-minute collection, historical backtesting, paper-fill ledger, fees/slippage modeling, and the account-equity curve are subsequent implementation steps.
+`discover` shows which requested assets currently have an exact MYR market and its exchange-reported status. `snapshot` fetches ticker and top-of-book data once when invoked. With a read-only key set, `signal` fetches up to 1,000 candles and prints an explainable baseline MA/MACD candidate signal. No command places orders or records a simulated fill. The signal is deliberately a starting rule for research, not an instruction to buy or sell.
+
+## Historical backtest (single asset)
+
+`backtest` compares the configured 5%, 6.5%, and 8% fixed stop candidates for one asset and one timeframe at a time. It accepts a CSV with these columns: `timestamp,open,high,low,close,volume`. Timestamps can be Unix seconds, Unix milliseconds, or timezone-aware ISO 8601 strings. At least 60 consecutive candles are required; gaps, duplicates, unsorted rows, and timeframe mismatches are rejected. A run is isolated to one asset and is not a combined portfolio result.
+
+Example (replace the cost assumptions with values appropriate for your account and data):
+
+```powershell
+.\.venv\Scripts\python.exe -m luno_agent.cli backtest `
+  --csv .\data\BTC-4h.csv --asset BTC --timeframe 4h --equity-myr 10000 `
+  --fee-pct-per-side 0.60 --spread-pct-round-trip 0.10 --slippage-pct-per-side 0.05
+```
+
+All three cost inputs are required so a run cannot silently treat costs as zero. The example values are illustrative only. [Luno Malaysia taker fees](https://guide.luno.com/hc/en-gb/articles/14581451031709-Luno-fees-and-limits-in-Malaysia) depend on rolling 30-day volume; verify your current account tier before using a fee assumption. The engine uses the same fixed fee on each fill, applies the supplied full spread and slippage, enters on the next candle open after a closed-bar signal, and uses conservative stop-gap fills. It enforces the configured per-trade risk, exposure caps, MYR-calendar-day entry limit, and 20% drawdown halt.
+
+OHLCV candles do not contain historical 15-minute order books. This initial backtester therefore takes a fixed spread assumption and does not model historical depth or partial fills. It also does not fetch or invent candle history: in the current environment, the official MCP `get_candles` call returned `ErrUnauthorized` without account credentials. Obtain candle CSV data through an authorized read-only source before interpreting any result. No performance result should be treated as a forecast.
 
 The MCP integration follows Luno's documented server and tool names: https://github.com/luno/luno-mcp. The server is a separate executable/container; the Python project launches it over MCP stdio and never invokes its account or write tools.
