@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .backtest import load_candles_csv, run_backtest
 from .indicators import momentum_signal
+from .market_data import download_luno_csvs
 from .paper import PaperSafetyError, acquire_lock, load_state, release_lock, run_paper_cycle, save_state
 from .portfolio_replay import run_portfolio_replay
 
@@ -65,6 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("--spread-pct-round-trip", required=True, type=float, help="Assumed full spread, as percent.")
     replay_parser.add_argument("--slippage-pct-per-side", required=True, type=float, help="Assumed slippage per fill, as percent.")
     replay_parser.add_argument("--report", default=".paper/replay-latest.json", help="Output JSON report path (includes trades and equity curve).")
+    fetch_parser = subparsers.add_parser("fetch-candles", help="Download completed Luno MYR candles into aligned CSV files.")
+    fetch_parser.add_argument("--data-dir", default="data", help="Output directory for ASSET-TIMEFRAME.csv files.")
+    fetch_parser.add_argument("--timeframe", choices=sorted(TIMEFRAMES), default="4h")
+    fetch_parser.add_argument("--days", type=int, default=365, help="History window to request; default 365 calendar days.")
     paper_parser = subparsers.add_parser("paper", help="Run persistent paper-only execution from candle CSVs and live public books.")
     paper_parser.add_argument("--data-dir", default="data", help="Directory containing ASSET-TIMEFRAME.csv files.")
     paper_parser.add_argument("--state-file", default=".paper/account.json", help="Local paper ledger path (never committed).")
@@ -136,6 +141,12 @@ def run_replay_cli(args: argparse.Namespace) -> int:
     summary["equity_curve_points"] = len(result["equity_curve"])
     summary["report"] = str(report_path.resolve())
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_fetch_cli(args: argparse.Namespace) -> int:
+    result = download_luno_csvs(args.data_dir, args.timeframe, args.days)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -256,6 +267,12 @@ def main() -> int:
         try:
             return run_replay_cli(args)
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+    if args.command == "fetch-candles":
+        try:
+            return run_fetch_cli(args)
+        except (OSError, KeyError, TypeError, ValueError, RuntimeError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
     if args.command == "paper" and (args.interval_seconds < 60 or args.equity_myr <= 0):

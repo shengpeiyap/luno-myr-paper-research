@@ -110,3 +110,21 @@ Example:
 ```
 
 Cost values above are examples only; replace them with assumptions appropriate to your Luno fee tier and the data source. The default report is `.paper/replay-latest.json`, ignored by Git, and contains the full virtual trade ledger and per-candle equity curve. The console prints a summary. Runs are independent and do not update the persistent `paper` account ledger.
+
+### Download Luno candle CSVs
+
+Use `fetch-candles` to retrieve completed 4-hour or daily candles for the four configured MYR markets and write aligned CSVs locally:
+
+```powershell
+.\.venv\Scripts\python.exe -m luno_agent.cli fetch-candles --timeframe 4h --days 365 --data-dir .\data
+```
+
+Then run `replay` with the same timeframe. Downloads use Luno's public exchange candle endpoint and only GET market data. The endpoint reference says no API permission is required, but if Luno returns HTTP 401 in your environment, retry with a read-only API key set in the current PowerShell session as `LUNO_API_KEY_ID` and `LUNO_API_SECRET`. The downloader never calls account, order, balance, or write endpoints and does not save the key. It requests pages of up to 1,000 candles, removes the currently open candle, aligns all four assets to common timestamps, validates the sequence, and only then writes the files. Pair history may differ; the report states the aligned range actually available.
+
+```powershell
+.\.venv\Scripts\python.exe -m luno_agent.cli replay `
+  --data-dir .\data --timeframe 4h --equity-myr 10000 `
+  --fee-pct-per-side 0.60 --spread-pct-round-trip 0.10 --slippage-pct-per-side 0.05
+```
+
+The `--days` window is a request, not a promise that every market has that much history. If fewer than 60 common completed bars are available, the command stops without writing CSVs.
