@@ -60,16 +60,36 @@ def load_candles_csv(path: str | Path, timeframe_seconds: int) -> list[dict[str,
                 raise ValueError(f"Low is inconsistent on CSV line {line_number}")
             candles.append(candle)
 
+    return validate_candles(candles, timeframe_seconds)
+
+
+def validate_candles(candles: list[dict[str, Any]], timeframe_seconds: int) -> list[dict[str, float | int]]:
+    """Validate normalized live or CSV OHLCV rows and fail closed on gaps."""
+    if timeframe_seconds <= 0:
+        raise ValueError("timeframe duration must be positive")
     if len(candles) < 60:
         raise ValueError("At least 60 candles are required for indicator warm-up and evaluation")
-    timestamps = [int(candle["timestamp"]) for candle in candles]
+    normalized: list[dict[str, float | int]] = []
+    for index, candle in enumerate(candles):
+        try:
+            row = {"timestamp": int(candle["timestamp"]), **{key: float(candle[key]) for key in ("open", "high", "low", "close", "volume")}}
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError(f"Invalid candle at row {index + 1}: {exc}") from exc
+        if any(not math.isfinite(float(value)) for value in row.values()):
+            raise ValueError(f"Non-finite candle value at row {index + 1}")
+        if min(row[key] for key in ("open", "high", "low", "close")) <= 0 or row["volume"] < 0:
+            raise ValueError(f"Invalid price or volume at row {index + 1}")
+        if row["high"] < max(row["open"], row["close"], row["low"]) or row["low"] > min(row["open"], row["close"], row["high"]):
+            raise ValueError(f"Inconsistent high/low at row {index + 1}")
+        normalized.append(row)
+    timestamps = [int(candle["timestamp"]) for candle in normalized]
     if timestamps != sorted(set(timestamps)):
         raise ValueError("Candles must be strictly increasing with no duplicate timestamps")
     expected_ms = timeframe_seconds * 1000
     for previous, current in zip(timestamps, timestamps[1:]):
         if current - previous != expected_ms:
             raise ValueError("Candle timestamps contain a gap or do not match the selected timeframe")
-    return candles
+    return normalized
 
 
 def _execution_price(raw_price: float, side: str, spread_pct: float, slippage_pct: float) -> float:

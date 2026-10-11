@@ -78,4 +78,19 @@ All three cost inputs are required so a run cannot silently treat costs as zero.
 
 OHLCV candles do not contain historical 15-minute order books. This initial backtester therefore takes a fixed spread assumption and does not model historical depth or partial fills. It also does not fetch or invent candle history: in the current environment, the official MCP `get_candles` call returned `ErrUnauthorized` without account credentials. Obtain candle CSV data through an authorized read-only source before interpreting any result. No performance result should be treated as a forecast.
 
+## Automatic paper execution
+
+The `paper` command runs a persistent **simulation only**. It uses the existing MA/MACD candidate rule, reads completed 4-hour or daily candles, and checks current public order-book data every 15 minutes. The default candle source is Luno and therefore needs candle access to work; if that remains unavailable, use fresh `ASSET-TIMEFRAME.csv` files with `--data-source csv`. CSV files must be updated externally. The runner refuses stale candles, stale/crossed books, spreads above the configured cap, inactive markets, malformed state, or an already-running second instance.
+
+Start with a single cycle to inspect behavior:
+
+```powershell
+.\.venv\Scripts\python.exe -m luno_agent.cli paper `
+  --timeframe 4h --equity-myr 10000 --fee-pct-per-side 0.60 --once
+```
+
+Omit `--once` to poll every 15 minutes. Once the API is available, use only a read-only key for market data. The state file defaults to `.paper/account.json` and is ignored by Git. Buys/sells are simulated from the visible order-book depth; partial fills are recorded, stops are monitored each cycle, and signal exits wait for a new closed candle. The ledger halts new entries at the configured 20% drawdown and requires manual review before resuming. The program does not call any Luno order, balance, or account tools and contains no live execution path.
+
+This is not ready for unattended use: candle access has not been verified for this account, the model has not been validated on historical account-specific fees and real paper logs, and the portfolio is not yet reconciled against actual account balances. Treat paper results as engineering validation only.
+
 The MCP integration follows Luno's documented server and tool names: https://github.com/luno/luno-mcp. The server is a separate executable/container; the Python project launches it over MCP stdio and never invokes its account or write tools.

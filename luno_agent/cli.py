@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import sys
@@ -13,6 +14,7 @@ from pathlib import Path
 
 from .backtest import load_candles_csv, run_backtest
 from .indicators import momentum_signal
+from .paper import PaperSafetyError, acquire_lock, load_state, release_lock, run_paper_cycle, save_state
 
 TIMEFRAMES = {"4h": 14_400, "1d": 86_400}
 ASSETS = {"BTC", "ETH", "SOL", "XRP"}
@@ -53,6 +55,16 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_parser.add_argument("--fee-pct-per-side", required=True, type=float, help="Actual or scenario fee per fill, as percent.")
     backtest_parser.add_argument("--spread-pct-round-trip", required=True, type=float, help="Assumed full bid/ask spread, as percent.")
     backtest_parser.add_argument("--slippage-pct-per-side", required=True, type=float, help="Assumed slippage per fill, as percent.")
+    paper_parser = subparsers.add_parser("paper", help="Run persistent paper-only execution from candle CSVs and live public books.")
+    paper_parser.add_argument("--data-dir", default="data", help="Directory containing ASSET-TIMEFRAME.csv files.")
+    paper_parser.add_argument("--state-file", default=".paper/account.json", help="Local paper ledger path (never committed).")
+    paper_parser.add_argument("--timeframe", choices=sorted(TIMEFRAMES), default="4h")
+    paper_parser.add_argument("--data-source", choices=("luno", "csv"), default="luno",
+                              help="Fetch fresh candles from Luno or read ASSET-TIMEFRAME.csv files.")
+    paper_parser.add_argument("--equity-myr", required=True, type=float, help="Initial MYR paper balance; used only for a new ledger.")
+    paper_parser.add_argument("--fee-pct-per-side", required=True, type=float, help="Scenario/account fee, as percent per fill.")
+    paper_parser.add_argument("--interval-seconds", type=int, default=900, help="Polling interval; default 15 minutes.")
+    paper_parser.add_argument("--once", action="store_true", help="Process one cycle and exit instead of looping.")
     return parser
 
 
@@ -91,6 +103,9 @@ async def main_async(args: argparse.Namespace) -> int:
     # Import MCP only for live market commands. Offline CSV backtests and
     # --help remain usable even when the MCP dependency/runtime is unavailable.
     from .api import LunoAPIError, LunoPublicClient
+
+    if args.command == "paper":
+        return await run_paper_cli(args)
 
     try:
         async with LunoPublicClient() as client:
@@ -138,6 +153,53 @@ async def main_async(args: argparse.Namespace) -> int:
         return 2
 
 
+async def run_paper_cli(args: argparse.Namespace) -> int:
+    if args.equity_myr <= 0 or args.interval_seconds < 60:
+        print("Error: --equity-myr must be positive and --interval-seconds at least 60", file=sys.stderr)
+        return 2
+    if not 0 <= args.fee_pct_per_side < 100:
+        print("Error: --fee-pct-per-side must be between 0 and 100", file=sys.stderr)
+        return 2
+    state_path = Path(args.state_file).resolve()
+    lock_descriptor = None
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_descriptor = acquire_lock(state_path)
+        state = load_state(state_path, args.equity_myr)
+        save_state(state_path, state)
+        config_path = Path(__file__).resolve().parent.parent / "config" / "strategy.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        async with _paper_client() as client:
+            while True:
+                try:
+                    candidate_state = copy.deepcopy(state)
+                    result = await run_paper_cycle(
+                        client, candidate_state, data_dir=Path(args.data_dir), timeframe=args.timeframe,
+                        data_source=args.data_source,
+                        fee_pct_per_side=args.fee_pct_per_side, risk=config["risk"],
+                        activity=config["activity"], execution=config["execution"],
+                    )
+                    save_state(state_path, candidate_state)
+                    state = candidate_state
+                except Exception as exc:
+                    result = {"mode": "paper", "error": str(exc), "new_entries_allowed": False}
+                print(json.dumps(result, ensure_ascii=False), flush=True)
+                if args.once:
+                    return 0 if "error" not in result else 2
+                await asyncio.sleep(args.interval_seconds)
+    except (OSError, KeyError, TypeError, ValueError, PaperSafetyError, json.JSONDecodeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if lock_descriptor is not None:
+            release_lock(state_path, lock_descriptor)
+
+
+def _paper_client():
+    from .api import LunoPublicClient
+    return LunoPublicClient()
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -149,6 +211,8 @@ def main() -> int:
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
+    if args.command == "paper" and (args.interval_seconds < 60 or args.equity_myr <= 0):
+        parser.error("--interval-seconds must be at least 60 and --equity-myr must be positive")
     if args.command == "signal" and not (os.environ.get("LUNO_API_KEY_ID") and os.environ.get("LUNO_API_SECRET")):
         print("Error: Luno requires API authentication for candles. Set a Luno read-only API key in this PowerShell session.", file=sys.stderr)
         return 2
