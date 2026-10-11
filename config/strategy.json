@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "environment": "paper",
+  "live_trading_enabled": false,
+  "base_currency": "MYR",
+  "assets": ["BTC", "ETH", "SOL", "XRP"],
+  "market_discovery": {
+    "provider": "luno",
+    "quote_currency": "MYR",
+    "require_active_market": true,
+    "require_exact_market_id_from_exchange": true
+  },
+  "strategy": {
+    "signal_timeframe": "4h",
+    "supported_signal_timeframes": ["4h", "1d"],
+    "order_book_snapshot_interval_minutes": 15,
+    "order_book_role": "execution_filter_only",
+    "indicators": {
+      "moving_average": true,
+      "macd": true
+    }
+  },
+  "risk": {
+    "stop_loss_candidates_pct": [5.0, 6.5, 8.0],
+    "paper_default_stop_loss_pct": 6.5,
+    "max_account_risk_per_trade_pct": 0.5,
+    "max_asset_exposure_pct": 25.0,
+    "max_total_crypto_exposure_pct": 80.0,
+    "account_drawdown_warning_pct": 10.0,
+    "account_drawdown_halt_pct": 20.0,
+    "include_estimated_fees_and_slippage": true,
+    "leverage_enabled": false
+  },
+  "activity": {
+    "max_new_entries_per_myr_calendar_day": 3,
+    "stop_out_reentry_counts_as_new_entry": true,
+    "require_manual_review_after_drawdown_halt": true
+  },
+  "execution": {
+    "mode": "paper",
+    "allow_market_orders": false,
+    "max_spread_pct": 0.5,
+    "max_order_book_age_seconds": 60,
+    "reject_when_market_status_unknown": true
+  },
+  "security": {
+    "allow_withdrawals": false,
+    "allow_transfers": false,
+    "api_key_permissions_mode": "read_only_until_paper_validation_complete"
+  }
+}
