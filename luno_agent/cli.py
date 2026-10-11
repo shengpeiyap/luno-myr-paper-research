@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .backtest import load_candles_csv, run_backtest
+from .alerts import format_paper_alert, send_telegram_alert, telegram_credentials_present
 from .indicators import momentum_signal
 from .market_data import download_luno_csvs
 from .paper import PaperSafetyError, acquire_lock, load_state, release_lock, run_paper_cycle, save_state
@@ -66,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("--spread-pct-round-trip", required=True, type=float, help="Assumed full spread, as percent.")
     replay_parser.add_argument("--slippage-pct-per-side", required=True, type=float, help="Assumed slippage per fill, as percent.")
     replay_parser.add_argument("--report", default=".paper/replay-latest.json", help="Output JSON report path (includes trades and equity curve).")
+    replay_parser.add_argument("--html-report", default=None, help="HTML dashboard path; defaults to the JSON report path with .html extension.")
     fetch_parser = subparsers.add_parser("fetch-candles", help="Download completed Luno MYR candles into aligned CSV files.")
     fetch_parser.add_argument("--data-dir", default="data", help="Output directory for ASSET-TIMEFRAME.csv files.")
     fetch_parser.add_argument("--timeframe", choices=sorted(TIMEFRAMES), default="4h")
@@ -80,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     paper_parser.add_argument("--fee-pct-per-side", required=True, type=float, help="Scenario/account fee, as percent per fill.")
     paper_parser.add_argument("--interval-seconds", type=int, default=900, help="Polling interval; default 15 minutes.")
     paper_parser.add_argument("--once", action="store_true", help="Process one cycle and exit instead of looping.")
+    paper_parser.add_argument("--alerts", choices=("none", "telegram"), default="none",
+                              help="Optional alerts for paper buys, sells, and drawdown halt; default off.")
     return parser
 
 
@@ -136,10 +140,15 @@ def run_replay_cli(args: argparse.Namespace) -> int:
     report_path = Path(args.report)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    html_path = Path(args.html_report) if args.html_report else report_path.with_suffix(".html")
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    from .report import render_replay_html
+    html_path.write_text(render_replay_html(result), encoding="utf-8")
     summary = {key: value for key, value in result.items() if key not in {"trades", "equity_curve"}}
     summary["trades"] = len(result["trades"])
     summary["equity_curve_points"] = len(result["equity_curve"])
     summary["report"] = str(report_path.resolve())
+    summary["html_report"] = str(html_path.resolve())
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
@@ -212,6 +221,9 @@ async def run_paper_cli(args: argparse.Namespace) -> int:
     if not 0 <= args.fee_pct_per_side < 100:
         print("Error: --fee-pct-per-side must be between 0 and 100", file=sys.stderr)
         return 2
+    if args.alerts == "telegram" and not telegram_credentials_present():
+        print("Error: Telegram alerts need LUNO_PAPER_TELEGRAM_BOT_TOKEN and LUNO_PAPER_TELEGRAM_CHAT_ID in this PowerShell session.", file=sys.stderr)
+        return 2
     state_path = Path(args.state_file).resolve()
     lock_descriptor = None
     try:
@@ -225,6 +237,7 @@ async def run_paper_cli(args: argparse.Namespace) -> int:
             while True:
                 try:
                     candidate_state = copy.deepcopy(state)
+                    was_halted = bool(state.get("halted_at_drawdown_limit"))
                     result = await run_paper_cycle(
                         client, candidate_state, data_dir=Path(args.data_dir), timeframe=args.timeframe,
                         data_source=args.data_source,
@@ -233,6 +246,15 @@ async def run_paper_cli(args: argparse.Namespace) -> int:
                     )
                     save_state(state_path, candidate_state)
                     state = candidate_state
+                    if args.alerts == "telegram":
+                        message = format_paper_alert(
+                            result, newly_halted=(not was_halted and bool(state.get("halted_at_drawdown_limit")))
+                        )
+                        if message:
+                            try:
+                                await asyncio.to_thread(send_telegram_alert, message)
+                            except RuntimeError as exc:
+                                print(f"Alert delivery error: {exc}", file=sys.stderr, flush=True)
                 except Exception as exc:
                     result = {"mode": "paper", "error": str(exc), "new_entries_allowed": False}
                 print(json.dumps(result, ensure_ascii=False), flush=True)

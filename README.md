@@ -109,7 +109,7 @@ Example:
   --fee-pct-per-side 0.60 --spread-pct-round-trip 0.10 --slippage-pct-per-side 0.05
 ```
 
-Cost values above are examples only; replace them with assumptions appropriate to your Luno fee tier and the data source. The default report is `.paper/replay-latest.json`, ignored by Git, and contains the full virtual trade ledger and per-candle equity curve. The console prints a summary. Runs are independent and do not update the persistent `paper` account ledger.
+Cost values above are examples only; replace them with assumptions appropriate to your Luno fee tier and the data source. By default the command writes `.paper/replay-latest.json` and a self-contained `.paper/replay-latest.html` dashboard, both ignored by Git. The HTML can be opened locally in a browser and shows MYR equity, drawdown, entry/exit markers, key metrics, and the trade ledger. Use `--html-report .\reports\replay.html` to choose another dashboard path. Runs are independent and do not update the persistent `paper` account ledger.
 
 ### Download Luno candle CSVs
 
@@ -128,3 +128,14 @@ Then run `replay` with the same timeframe. Downloads use Luno's public exchange 
 ```
 
 The `--days` window is a request, not a promise that every market has that much history. If fewer than 60 common completed bars are available, the command stops without writing CSVs.
+
+### Optional Telegram alerts for paper mode
+
+Alerts are disabled by default. To opt in, create a Telegram bot, obtain its chat ID, then set `LUNO_PAPER_TELEGRAM_BOT_TOKEN` and `LUNO_PAPER_TELEGRAM_CHAT_ID` in the current PowerShell session. Keep the bot token private; it is read from the process environment, never saved in the project or printed. Start paper mode with `--alerts telegram` to receive simulated buys, sells, and the account drawdown halt:
+
+```powershell
+.\.venv\Scripts\python.exe -m luno_agent.cli paper `
+  --timeframe 4h --equity-myr 10000 --fee-pct-per-side 0.60 --alerts telegram
+```
+
+This option sends notifications only. It does not enable Luno account access or live orders. A failed notification is reported in the local console; paper state is still saved.
